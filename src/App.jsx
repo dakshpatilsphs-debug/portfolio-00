@@ -360,19 +360,26 @@ export default function App() {
     }
   }, [])
 
-  // keyboard shortcuts
+  // keyboard shortcuts - fixed stale closure
+  const unlockedRef = useRef(unlocked)
+  const lockOpenRef = useRef(lockOpen)
+  const adminOpenRef = useRef(adminOpen)
+  useEffect(() => { unlockedRef.current = unlocked }, [unlocked])
+  useEffect(() => { lockOpenRef.current = lockOpen }, [lockOpen])
+  useEffect(() => { adminOpenRef.current = adminOpen }, [adminOpen])
+
   useEffect(() => {
     let buf = ''
     const onKey = (e) => {
       if (e.key === 'Escape') {
-        if (lockOpen) {
+        if (lockOpenRef.current) {
           setLockOpen(false)
           return
         }
         setMenuChecked(false)
         setNavOpen(false)
         setView(null)
-        if (adminOpen) setAdminOpen(false)
+        if (adminOpenRef.current) setAdminOpen(false)
       }
       const t = e.target
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
@@ -380,14 +387,22 @@ export default function App() {
         buf = (buf + e.key.toLowerCase()).slice(-8)
         if (buf.indexOf('admin') > -1) {
           buf = ''
-          handleOpenAdmin()
+          if (!unlockedRef.current) {
+            setPinErr('')
+            setPinInput('')
+            setLockOpen(true)
+            setTimeout(() => document.getElementById('pinInput')?.focus(), 60)
+          } else {
+            setAdminOpen(true)
+            setAdminOn(true)
+            setView(null)
+          }
         }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lockOpen, adminOpen])
+  }, [])
 
   // firebase listeners
   useEffect(() => {
@@ -627,6 +642,17 @@ export default function App() {
     }
   }, [ask, busy, content, projects, callOpenRouter])
 
+  // initial welcome - make chat come up on first page
+  useEffect(() => {
+    if (!hinted && chat.length === 0) {
+      setHinted(true)
+      const welcome = `Hi — I'm the <b>Fastshot assistant</b> for <b>${esc(content.name)}</b> (${esc(content.role)}).<br>Ask me about <b>projects</b>, <b>skills</b>, <b>background</b> or <b>contact</b>.<br><span class="muted">Try: “What projects do you have?” · “Show your skills” · “How to reach you?”</span>`
+      setChat([{ cls: 'a', html: welcome }])
+      // also hint history for AI
+      chatHistoryRef.current = []
+    }
+  }, [content.name, content.role, hinted, chat.length])
+
   // scroll chat
   useEffect(() => {
     if (chatOutRef.current) chatOutRef.current.scrollTop = chatOutRef.current.scrollHeight
@@ -727,9 +753,10 @@ export default function App() {
               <span>{it.label}</span>
             </button>
           ))}
-          <button className={`sb-item admin ${adminOn ? '' : ''}`} style={{ display: adminOn ? 'flex' : 'none' }} data-view="admin" onClick={handleOpenAdmin}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 9V7.4a5 5 0 0 0-10 0V9H5.6c-.6 0-1.1.5-1.1 1.1v9.2c0 .6.5 1.1 1.1 1.1h12.8c.6 0 1.1-.5 1.1-1.1v-9.2c0-.6-.5-1.1-1.1-1.1H17Zm-8-1.6a3 3 0 0 1 6 0V9H9V7.4Z"/></svg>
-            <span>Admin</span>
+          <button className={`sb-item ${adminOpen ? 'on' : ''}`} style={{ display: 'flex', opacity: unlocked ? 1 : 0.85, border: unlocked ? undefined : '1px dashed rgba(248,178,133,.4)' }} data-view="admin" onClick={handleOpenAdmin} title={unlocked ? 'Admin editor' : 'Admin (locked) - click to unlock'}>
+            <svg viewBox="0 0 24 24" fill={unlocked ? 'currentColor' : 'none'} stroke={unlocked ? 'none' : 'currentColor'} strokeWidth={unlocked ? undefined : '1.6'}><path d="M17 9V7.4a5 5 0 0 0-10 0V9H5.6c-.6 0-1.1.5-1.1 1.1v9.2c0 .6.5 1.1 1.1 1.1h12.8c.6 0 1.1-.5 1.1-1.1v-9.2c0-.6-.5-1.1-1.1-1.1H17Zm-8-1.6a3 3 0 0 1 6 0V9H9V7.4Z" fill={unlocked ? 'currentColor' : 'none'} /></svg>
+            <span>{unlocked ? 'Admin' : 'Admin (locked)'}</span>
+            {!unlocked && <span style={{ marginLeft: 'auto', fontSize: '10px', color: 'var(--accent-2)' }}>🔒</span>}
           </button>
           <div className="sb-foot">Fastshot portfolio · data lives in Cloud Firestore · photos hosted via ImgBB</div>
         </aside>
@@ -834,10 +861,73 @@ export default function App() {
             </div>
           </div>
 
-          <main className="hero" id="main" tabIndex={-1}>
-            <h1 className="h1">Describe an app. We'll build it.</h1>
+          <main className="hero" id="main" tabIndex={-1} style={{ justifyContent: 'flex-start', paddingTop: 'clamp(18px,4vh,40px)', gap: 'clamp(14px,2.8vh,28px)' }}>
+            <div style={{ textAlign: 'center', maxWidth: '720px' }}>
+              <h1 className="h1" style={{ fontSize: 'clamp(28px,4.4vw,36.25px)' }}>Describe an app. We'll build it.</h1>
+              <p style={{ color: 'var(--ink-2)', fontSize: '13px', marginTop: '10px', letterSpacing: '0.007em' }}>Chat with the portfolio — powered by <b style={{ color: '#fff', fontWeight: 500 }}>OpenRouter Free</b> + Firestore</p>
+            </div>
 
-            <div className="composer">
+            <div className="composer" style={{ gap: '14px' }}>
+              <div className="chat-out on" id="chatOut" ref={chatOutRef} aria-live="polite" aria-atomic="false" style={{ display: 'flex', maxHeight: 'min(42vh, 380px)', minHeight: '220px', background: 'rgba(24,24,27,.55)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)', border: '1px solid var(--line)', borderRadius: '18px', padding: '14px', boxShadow: '0 12px 40px rgba(0,0,0,.28)' }}>
+                {chat.length === 0 ? (
+                  <div className="msg a" style={{ alignSelf: 'flex-start' }}><span className="typing-dots"><span></span><span></span><span></span></span> <span style={{ marginLeft: 6, color: 'var(--ink-3)', fontSize: 12 }}>loading chat…</span></div>
+                ) : (
+                  chat.map((m, i) => (
+                    <div key={i} className={`msg ${m.cls}`} dangerouslySetInnerHTML={m.cls === 'q' ? undefined : { __html: m.html }}>
+                      {m.cls === 'q' ? m.html : null}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
+                {['What projects do you have?', 'Show your skills', 'How to contact?', 'Tell me about Ledgerly'].map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    className="tag"
+                    style={{ cursor: 'pointer', borderColor: 'rgba(248,178,133,.22)', background: 'rgba(255,255,255,.06)', color: '#E9E9EC', padding: '7px 12px', fontSize: '12px' }}
+                    onClick={() => {
+                      setAsk(t)
+                      setTimeout(() => {
+                        const fake = { preventDefault: () => {}, target: { value: t } }
+                        // setAsk is async, so use direct submit with t
+                        const v = t.trim()
+                        if (!v || busy) return
+                        setBusy(true)
+                        const userHtml = esc(v)
+                        setChat((c) => [...c, { cls: 'q', html: userHtml }])
+                        chatHistoryRef.current.push({ role: 'user', content: v })
+                        const typingId = `typing-${Date.now()}`
+                        setChat((c) => [...c, { cls: 'a', html: `<span class="typing-dots"><span></span><span></span><span></span></span> <span style="margin-left:6px;color:var(--ink-3);font-size:12px">thinking…</span>`, id: typingId }])
+                        if (fbOk) { try { addDoc(collection(db, 'questions'), { q: v, createdAt: Date.now() }) } catch {} }
+                        setAsk('')
+                        callOpenRouter(v, chatHistoryRef.current.slice(0, -1))
+                          .then((reply) => {
+                            setChat((c) => c.filter((x) => x.id !== typingId))
+                            const html = mdToHtml(reply)
+                            setChat((c) => [...c, { cls: 'a', html }])
+                            chatHistoryRef.current.push({ role: 'assistant', content: reply })
+                            if (chatHistoryRef.current.length > 16) chatHistoryRef.current = chatHistoryRef.current.slice(-16)
+                          })
+                          .catch((err) => {
+                            setChat((c) => c.filter((x) => x.id !== typingId))
+                            const fallback = buildFallbackAnswer(v, content, projects)
+                            setChat((c) => [...c, { cls: 'a', html: `${fallback}<br><span class="muted">(offline answer — AI unavailable: ${esc(err.message).slice(0, 120)})</span>` }])
+                            chatHistoryRef.current.push({ role: 'assistant', content: fallback })
+                          })
+                          .finally(() => {
+                            setBusy(false)
+                            setTimeout(() => askRef.current?.focus(), 0)
+                          })
+                      }, 10)
+                    }}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+
               <form
                 className={`card ${ask.trim() ? 'typing' : ''}`}
                 id="composer"
@@ -863,12 +953,6 @@ export default function App() {
                   placeholder={placeholder}
                   value={ask}
                   onChange={(e) => setAsk(e.target.value)}
-                  onFocus={() => {
-                    if (!hinted) {
-                      setHinted(true)
-                      pushMsg('a', 'Hi — I\'m the Fastshot assistant. Ask about <b>projects</b>, <b>skills</b>, <b>background</b> or <b>contact</b>. I use OpenRouter + this portfolio\'s Firestore data.')
-                    }
-                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault()
@@ -913,14 +997,6 @@ export default function App() {
                   </div>
                 </div>
               </form>
-
-              <div className={`chat-out ${chat.length ? 'on' : ''}`} id="chatOut" ref={chatOutRef} aria-live="polite" aria-atomic="false">
-                {chat.map((m, i) => (
-                  <div key={i} className={`msg ${m.cls}`} dangerouslySetInnerHTML={m.cls === 'q' ? undefined : { __html: m.html }} >
-                    {m.cls === 'q' ? m.html : null}
-                  </div>
-                ))}
-              </div>
             </div>
           </main>
         </div>
