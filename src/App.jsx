@@ -32,7 +32,7 @@ const FB = {
 const DEF = {
   brandName: 'Fastshot Studio',
   logoUrl: '',
-  name: 'Aarav Mehta',
+  name: 'Daksh Patil',
   role: 'Full-stack Product Engineer',
   tagline: 'I turn written ideas into working apps, end to end.',
   about:
@@ -101,7 +101,15 @@ const getOpenRouterKey = () => {
   } catch { return OPENROUTER_KEY_DEFAULT }
 }
 const CACHE_KEY = 'fs_portfolio_v1'
+const MESSAGES_CACHE = 'fs_messages_v1'
 const PH_TEXT = 'Build a fintech tracking app with bank level privacy and...'
+function loadLocalMessages(){ try{ const r=localStorage.getItem(MESSAGES_CACHE); return r?JSON.parse(r):[] }catch{ return [] } }
+function saveLocalMessage(m){ try{ const a=loadLocalMessages(); a.unshift(m); localStorage.setItem(MESSAGES_CACHE, JSON.stringify(a.slice(0,50))); }catch{} }
+function mergeMessages(remote, local){
+  const map=new Map()
+  ;[...remote, ...local].forEach(x=>{ if(!map.has(x.id)) map.set(x.id, x) })
+  return Array.from(map.values()).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).slice(0,50)
+}
 
 // ---------- utils ----------
 function sanitizeUrl(u) {
@@ -242,6 +250,8 @@ function docToContent(s) {
   ;['name','role','tagline','about','skills','email','phone','location','availability','github','linkedin','avatarUrl','photoUrl','adminPin','brandName','logoUrl'].forEach((k) => {
     if (typeof s[k] === 'string') o[k] = s[k]
   })
+  // migrate old Aarav Mehta → Daksh Patil
+  if (o.name && String(o.name).trim() === 'Aarav Mehta') o.name = 'Daksh Patil'
   return o
 }
 function snapToProject(id, s) {
@@ -255,7 +265,11 @@ export default function App() {
       const raw = localStorage.getItem(CACHE_KEY)
       if (raw) {
         const d = JSON.parse(raw)
-        if (d.content) return { ...DEF, ...d.content }
+        if (d.content) {
+          const merged = { ...DEF, ...d.content }
+          if (merged.name && String(merged.name).trim() === 'Aarav Mehta') merged.name = 'Daksh Patil'
+          return merged
+        }
       }
     } catch {}
     return { ...DEF }
@@ -351,33 +365,9 @@ export default function App() {
     }
   }, [])
 
-  // placeholder responsive
+  // placeholder - always visible, fixes truncated "Build a fintech..." in screenshot
   useEffect(() => {
-    const mT = window.matchMedia('(min-width:600px) and (max-width:1180px) and (min-height:600px)')
-    const mC = window.matchMedia('(max-width:599px),(max-height:599px) and (max-width:1180px)')
-    const sync = () => {
-      const desktop = !(mT.matches || mC.matches)
-      setPlaceholder(desktop ? '' : PH_TEXT)
-    }
-    sync()
-    const l1 = () => sync()
-    const l2 = () => sync()
-    try {
-      mT.addEventListener('change', l1)
-      mC.addEventListener('change', l2)
-    } catch {
-      mT.addListener(l1)
-      mC.addListener(l2)
-    }
-    return () => {
-      try {
-        mT.removeEventListener('change', l1)
-        mC.removeEventListener('change', l2)
-      } catch {
-        mT.removeListener(l1)
-        mC.removeListener(l2)
-      }
-    }
+    setPlaceholder(PH_TEXT)
   }, [])
 
   // keyboard shortcuts - fixed stale closure
@@ -483,6 +473,19 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [remoteMode])
 
+  // migrate Aarav → Daksh (one-time)
+  useEffect(() => {
+    if (String(content.name).trim() === 'Aarav Mehta') {
+      const fixed = { ...content, name: 'Daksh Patil' }
+      setContent(fixed)
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify({ content: fixed, projects })) } catch {}
+      // also try to update Firestore if reachable
+      if (fbOk) {
+        try { setDoc(doc(db, 'portfolio', 'content'), { name: 'Daksh Patil' }, { merge: true }) } catch {}
+      }
+    }
+  }, []) // run once
+
   // update document title
   useEffect(() => {
     document.title = `${content.brandName || 'Portfolio'} — Describe an app. We'll build it.`
@@ -505,6 +508,18 @@ export default function App() {
     saveCache(content, projects)
   }, [content, projects, saveCache])
 
+  // inbox realtime - Firestore + local merge
+  useEffect(() => {
+    if (!fbOk) { setInbox(loadLocalMessages()); return }
+    const q = query(collection(db, 'messages'), orderBy('createdAt', 'desc'), limit(50))
+    const unsub = onSnapshot(q, (qs) => {
+      const remote=[]
+      qs.forEach(d=>{ const v=d.data(); v.id=d.id; remote.push(v) })
+      setInbox(mergeMessages(remote, loadLocalMessages()))
+    }, () => { setInbox(loadLocalMessages()) })
+    return () => { try{unsub()}catch{} }
+  }, [])
+
   // cloud state
   useEffect(() => {
     if (!fbOk) setCloudState('Local only — Firestore unreachable')
@@ -522,24 +537,21 @@ export default function App() {
     setAdminOpen(true)
     setAdminOn(true)
     setView(null)
-    // load inbox
-    if (fbOk) {
-      const q = query(collection(db, 'messages'), orderBy('createdAt', 'desc'), limit(50))
-      getDocs(q)
-        .then((qs) => {
-          const arr = []
-          qs.forEach((d) => {
-            const v = d.data()
-            v.id = d.id
-            arr.push(v)
-          })
-          setInbox(arr)
-        })
-        .catch((err) => {
-          setInbox([])
-          showToast(`Could not read messages: ${err.code}`, true)
-        })
-    }
+    // load inbox - merge Firestore + local
+    const local = loadLocalMessages()
+    if (!fbOk) { setInbox(local); return }
+    const q = query(collection(db, 'messages'), orderBy('createdAt', 'desc'), limit(50))
+    getDocs(q)
+      .then((qs) => {
+        const arr = []
+        qs.forEach((d) => { const v=d.data(); v.id=d.id; arr.push(v) })
+        setInbox(mergeMessages(arr, local))
+      })
+      .catch((err) => {
+        setInbox(local)
+        if(local.length) showToast(`Showing ${local.length} local message(s) — Firestore: ${err.code}`, true)
+        else showToast(`Could not read messages: ${err.code}`, true)
+      })
   }, [unlocked, showToast])
 
   const doUnlock = useCallback(() => {
@@ -601,7 +613,9 @@ export default function App() {
 
   const buildSystemPrompt = useCallback(() => {
     const projs = projects.map((p) => `- ${p.title}: ${p.blurb || ''} [${p.tags || ''}] ${p.link || ''}`).join('\n')
-    return `You are Fastshot portfolio assistant for ${content.name || 'Portfolio'} — ${content.role || ''}.\nTagline: ${content.tagline || ''}\nAbout: ${content.about || ''}\nSkills: ${content.skills || ''}\nContact: email=${content.email || ''}, phone=${content.phone || ''}, location=${content.location || ''}, availability=${content.availability || ''}, github=${content.github || ''}, linkedin=${content.linkedin || ''}\nProjects:\n${projs || 'No projects yet'}\nBe concise, friendly, and answer from this context first. If user asks outside scope, politely say you specialize in this portfolio but you can still help generally. Use plain text, you may use simple markdown bold. No disallowed content.`
+    return `You are STRICTLY the Fastshot portfolio assistant for ${content.name || 'Portfolio'} — ${content.role || ''} on the OpenRouter FREE model ${OPENROUTER_MODEL}.\n` +
+           `Tagline: ${content.tagline || ''}\nAbout: ${content.about || ''}\nSkills: ${content.skills || ''}\nContact: email=${content.email || ''}, phone=${content.phone || ''}, location=${content.location || ''}, availability=${content.availability || ''}, github=${content.github || ''}, linkedin=${content.linkedin || ''}\nProjects:\n${projs || 'No projects yet'}\n` +
+           `RULES: You are ONLY allowed to give assistance related to this portfolio (projects, skills, background, contact, building apps). You MUST NOT give any other info, disallowed content, off-topic or general knowledge beyond portfolio assistance. If user asks for disallowed/other info, politely refuse: "I can only assist with this portfolio — ask about projects, skills, or contact." Be concise, friendly, plain text with **bold**. ONLY assistance.`
   }, [content, projects])
 
   const callOpenRouter = useCallback(async (userMsg, history) => {
@@ -664,10 +678,7 @@ export default function App() {
       setChat((c) => c.filter((x) => x.id !== typingId))
       const fallback = buildFallbackAnswer(v, content, projects)
       const isRevoked = String(err.message).includes('FREE_OFFLINE') || String(err.message).includes('401') || String(err.message).includes('revoked')
-      // Show clean portfolio answer as free model, with subtle hint to add key if offline
-      const extra = isRevoked
-        ? `<br><span class="muted" style="display:block;margin-top:8px;padding:8px 10px;background:rgba(24,24,27,.72);border:1px solid var(--line);border-radius:10px;font-size:12px">✅ <b>Free model active (offline portfolio)</b> — No key needed. For live AI, add your <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" style="color:var(--accent-2);text-decoration:underline">free OpenRouter key</a> <button id="openrouter-key-btn" onclick="window.dispatchEvent(new CustomEvent('open-key-dialog'))" style="margin-left:6px;padding:4px 8px;border-radius:6px;background:rgba(156,134,206,.18);border:1px solid rgba(156,134,206,.3);color:#fff;cursor:pointer;font-size:11px">Set key</button></span>`
-        : `<br><span class="muted">(AI unavailable: ${esc(err.message).slice(0, 120)})</span>`
+      const extra = isRevoked ? '' : `<br><span class="muted">(AI unavailable: ${esc(err.message).slice(0, 120)})</span>`
       setChat((c) => [...c, { cls: 'a', html: `${fallback}${extra}` }])
       chatHistoryRef.current.push({ role: 'assistant', content: fallback })
     } finally {
@@ -956,9 +967,7 @@ export default function App() {
                             setChat((c) => c.filter((x) => x.id !== typingId))
                             const fallback = buildFallbackAnswer(v, content, projects)
                             const isRevoked2 = String(err.message).includes('FREE_OFFLINE') || String(err.message).includes('401') || String(err.message).includes('revoked')
-                            const extra2 = isRevoked2
-                              ? `<br><span class="muted" style="display:block;margin-top:8px;padding:8px 10px;background:rgba(24,24,27,.72);border:1px solid var(--line);border-radius:10px;font-size:12px">✅ <b>Free model active (offline portfolio)</b> — No key needed.</span>`
-                              : `<br><span class="muted">(AI unavailable: ${esc(err.message).slice(0, 120)})</span>`
+                            const extra2 = isRevoked2 ? '' : `<br><span class="muted">(AI unavailable: ${esc(err.message).slice(0, 120)})</span>`
                             setChat((c) => [...c, { cls: 'a', html: `${fallback}${extra2}` }])
                             chatHistoryRef.current.push({ role: 'assistant', content: fallback })
                           })
@@ -1208,15 +1217,34 @@ export default function App() {
                   if (tryPin(cf.phone)) return
                   if (cf.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cf.email)) return showToast('Enter a valid email', true)
                   if (cf.msg.trim().length < 8) return showToast('Message too short', true)
-                  const data = { name: cf.name.trim(), email: cf.email.trim(), phone: cf.phone.trim(), message: cf.msg.trim(), createdAt: Date.now() }
-                  if (!fbOk) return showToast('Saved locally (offline)', true)
-                  try {
-                    await addDoc(collection(db, 'messages'), data)
-                    setCf({ name: '', email: '', phone: '', msg: '' })
-                    showToast('Message sent — thank you')
-                  } catch (err) {
-                    showToast(`Could not send: ${err.code}`, true)
+                  const base = { name: cf.name.trim(), email: cf.email.trim(), phone: cf.phone.trim(), message: cf.msg.trim(), createdAt: Date.now() }
+                  // try Firebase first (primary), fallback to local
+                  if (fbOk) {
+                    try {
+                      const ref = await addDoc(collection(db, 'messages'), base)
+                      const saved = { ...base, id: ref.id }
+                      setInbox(prev => mergeMessages([saved], prev))
+                      setCf({ name: '', email: '', phone: '', msg: '' })
+                      showToast('Message sent — will appear in inbox (Firebase)', false)
+                      return
+                    } catch (err) {
+                      // Firebase failed -> save locally
+                      const localMsg = { ...base, id: 'local-'+Date.now() }
+                      saveLocalMessage(localMsg)
+                      setInbox(prev => mergeMessages([localMsg], prev))
+                      setCf({ name: '', email: '', phone: '', msg: '' })
+                      if (err.code === 'permission-denied' || err.code === 'unavailable' || err.code === 'failed-precondition') {
+                        showToast(`Saved locally — Firestore denied: ${err.code} — check rules`, true)
+                      } else showToast(`Cloud error: ${err.code} — saved locally`, true)
+                      return
+                    }
                   }
+                  // offline (fbOk false)
+                  const localMsg = { ...base, id: 'local-'+Date.now() }
+                  saveLocalMessage(localMsg)
+                  setInbox(prev => mergeMessages([localMsg], prev))
+                  setCf({ name: '', email: '', phone: '', msg: '' })
+                  showToast('Message sent — saved locally (offline)', false)
                 }}
               >
                 <div className="frow">
@@ -1686,13 +1714,18 @@ export default function App() {
 
           <div className={`tabpane ${adminTab === 'inbox' ? 'on' : ''}`} data-pane="inbox">
             <div className="card-g" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} id="admInbox">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                <span className="note">{inbox.length ? `${inbox.length} message(s) — from contact form (Firestore + local)` : 'No messages yet — send one via Contact → inbox appears here instantly.'}</span>
+                {inbox.length > 0 && <button className="btn ghost sm" onClick={()=>{ if(confirm('Clear local messages?')){ try{ localStorage.removeItem(MESSAGES_CACHE); setInbox([]); showToast('Local inbox cleared') }catch{} } }}>Clear local</button>}
+              </div>
               {inbox.length === 0 ? <p className="note">No messages yet.</p> : inbox.map((m) => (
-                <div key={m.id} className="msg-item">
+                <div key={m.id} className="msg-item" style={{ borderLeftColor: String(m.id).startsWith('local-') ? 'rgba(248,178,133,.55)' : 'rgba(156,134,206,.55)' }}>
                   <div>
                     <b>{m.name || '(no name)'}</b>
-                    <span>{(m.email || '') + ' · ' + (m.createdAt ? new Date(m.createdAt).toLocaleString() : '')}</span>
+                    <span>{[m.email, m.phone].filter(Boolean).join(' · ') + (m.createdAt ? ' · ' + new Date(m.createdAt).toLocaleString() : '')}{String(m.id).startsWith('local-') ? ' · local' : ''}</span>
                   </div>
                   <p>{m.message || ''}</p>
+                  {m.phone && <p className="note" style={{ marginTop: 4 }}>Phone: {m.phone}</p>}
                 </div>
               ))}
             </div>
