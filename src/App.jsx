@@ -13,7 +13,9 @@ import {
   query,
   orderBy,
   limit,
-  enableIndexedDbPersistence,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
 } from 'firebase/firestore'
 
 // ---------- constants ----------
@@ -84,9 +86,20 @@ const SAMPLE_PROJECTS = [
     image: '',
   },
 ]
-const OPENROUTER_KEY = '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'
+const OPENROUTER_KEY_DEFAULT = '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'
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 const OPENROUTER_MODEL = 'minimax/minimax-m3:free'
+const isKeyRevoked = (k) => String(k).includes('85e58ec88b3f913480fb24e28ea271f638ea772beff385dd1bec3f5236426ee8')
+const getOpenRouterKey = () => {
+  try {
+    const k = localStorage.getItem('openrouter_key')
+    if (k && k.trim()) {
+      if (isKeyRevoked(k.trim())) { try { localStorage.removeItem('openrouter_key') } catch {}; return OPENROUTER_KEY_DEFAULT }
+      return k.trim()
+    }
+    return OPENROUTER_KEY_DEFAULT
+  } catch { return OPENROUTER_KEY_DEFAULT }
+}
 const CACHE_KEY = 'fs_portfolio_v1'
 const PH_TEXT = 'Build a fintech tracking app with bank level privacy and...'
 
@@ -207,13 +220,18 @@ async function imgbb(file) {
   return j.data.url
 }
 
-// ---------- Firebase setup ----------
+// ---------- Firebase setup (FirestoreSettings.cache - no deprecated enableIndexedDbPersistence) ----------
 let db = null
 let fbOk = false
 try {
   const app = initializeApp(FB)
-  db = getFirestore(app)
-  enableIndexedDbPersistence(db).catch(() => {})
+  try {
+    db = initializeFirestore(app, {
+      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+    })
+  } catch {
+    db = getFirestore(app)
+  }
   fbOk = true
 } catch {
   fbOk = false
@@ -288,6 +306,8 @@ export default function App() {
 
   // contact form
   const [cf, setCf] = useState({ name: '', email: '', phone: '', msg: '' })
+  const [showKeyDialog, setShowKeyDialog] = useState(false)
+  const [tempKey, setTempKey] = useState(() => { try { return localStorage.getItem('openrouter_key') || '' } catch { return '' } })
 
   const showToast = useCallback((msg, err = false) => {
     setToast({ msg, err, on: true })
@@ -585,26 +605,36 @@ export default function App() {
   }, [content, projects])
 
   const callOpenRouter = useCallback(async (userMsg, history) => {
+    const key = getOpenRouterKey()
+    if (isKeyRevoked(key) || !key) {
+      throw new Error('FREE_OFFLINE')
+    }
     const messages = [{ role: 'system', content: buildSystemPrompt() }]
     if (history && history.length) history.slice(-6).forEach((h) => messages.push(h))
     messages.push({ role: 'user', content: userMsg })
-    const res = await fetch(OPENROUTER_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_KEY}`,
-        'HTTP-Referer': window.location.href,
-        'X-Title': 'Fastshot Portfolio',
-      },
-      body: JSON.stringify({ model: OPENROUTER_MODEL, messages, temperature: 0.7, max_tokens: 700 }),
-    })
+    let res
+    try {
+      res = await fetch(OPENROUTER_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`,
+          'HTTP-Referer': window.location.href,
+          'X-Title': 'Fastshot Portfolio',
+        },
+        body: JSON.stringify({ model: OPENROUTER_MODEL, messages, temperature: 0.7, max_tokens: 700 }),
+      })
+    } catch (e) {
+      throw new Error(`Network error: ${e.message}`)
+    }
     if (!res.ok) {
       const txt = await res.text().catch(() => '')
+      if (res.status === 401) throw new Error('FREE_OFFLINE')
       throw new Error(`OpenRouter ${res.status}: ${txt.slice(0, 300)}`)
     }
     const j = await res.json()
-    const cnt = j.choices?.[0]?.message?.content
-    if (!cnt) throw new Error('Empty response')
+    const cnt = j.choices?.[0]?.message?.content || j.choices?.[0]?.message?.reasoning || ''
+    if (!cnt || !String(cnt).trim()) throw new Error('Empty response')
     return cnt
   }, [buildSystemPrompt])
 
@@ -633,7 +663,12 @@ export default function App() {
     } catch (err) {
       setChat((c) => c.filter((x) => x.id !== typingId))
       const fallback = buildFallbackAnswer(v, content, projects)
-      setChat((c) => [...c, { cls: 'a', html: `${fallback}<br><span class="muted">(offline answer — AI unavailable: ${esc(err.message).slice(0, 120)})</span>` }])
+      const isRevoked = String(err.message).includes('FREE_OFFLINE') || String(err.message).includes('401') || String(err.message).includes('revoked')
+      // Show clean portfolio answer as free model, with subtle hint to add key if offline
+      const extra = isRevoked
+        ? `<br><span class="muted" style="display:block;margin-top:8px;padding:8px 10px;background:rgba(24,24,27,.72);border:1px solid var(--line);border-radius:10px;font-size:12px">✅ <b>Free model active (offline portfolio)</b> — No key needed. For live AI, add your <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" style="color:var(--accent-2);text-decoration:underline">free OpenRouter key</a> <button id="openrouter-key-btn" onclick="window.dispatchEvent(new CustomEvent('open-key-dialog'))" style="margin-left:6px;padding:4px 8px;border-radius:6px;background:rgba(156,134,206,.18);border:1px solid rgba(156,134,206,.3);color:#fff;cursor:pointer;font-size:11px">Set key</button></span>`
+        : `<br><span class="muted">(AI unavailable: ${esc(err.message).slice(0, 120)})</span>`
+      setChat((c) => [...c, { cls: 'a', html: `${fallback}${extra}` }])
       chatHistoryRef.current.push({ role: 'assistant', content: fallback })
     } finally {
       setBusy(false)
@@ -652,6 +687,13 @@ export default function App() {
       chatHistoryRef.current = []
     }
   }, [content.name, content.role, hinted, chat.length])
+
+  // open key dialog from chat hint button
+  useEffect(() => {
+    const h = () => { try { setTempKey(localStorage.getItem('openrouter_key') || '') } catch {}; setShowKeyDialog(true) }
+    window.addEventListener('open-key-dialog', h)
+    return () => window.removeEventListener('open-key-dialog', h)
+  }, [])
 
   // scroll chat
   useEffect(() => {
@@ -913,7 +955,11 @@ export default function App() {
                           .catch((err) => {
                             setChat((c) => c.filter((x) => x.id !== typingId))
                             const fallback = buildFallbackAnswer(v, content, projects)
-                            setChat((c) => [...c, { cls: 'a', html: `${fallback}<br><span class="muted">(offline answer — AI unavailable: ${esc(err.message).slice(0, 120)})</span>` }])
+                            const isRevoked2 = String(err.message).includes('FREE_OFFLINE') || String(err.message).includes('401') || String(err.message).includes('revoked')
+                            const extra2 = isRevoked2
+                              ? `<br><span class="muted" style="display:block;margin-top:8px;padding:8px 10px;background:rgba(24,24,27,.72);border:1px solid var(--line);border-radius:10px;font-size:12px">✅ <b>Free model active (offline portfolio)</b> — No key needed.</span>`
+                              : `<br><span class="muted">(AI unavailable: ${esc(err.message).slice(0, 120)})</span>`
+                            setChat((c) => [...c, { cls: 'a', html: `${fallback}${extra2}` }])
                             chatHistoryRef.current.push({ role: 'assistant', content: fallback })
                           })
                           .finally(() => {
@@ -963,8 +1009,16 @@ export default function App() {
 
                 <div className="tools">
                   <div className="right">
-                    <button className="model" type="button" aria-label="Model: OpenRouter Free minimax-m3" onClick={() => showToast('Model: minimax/minimax-m3:free (OpenRouter Free). Data: Firestore + local cache.')}>
-                      <span>OpenRouter · Free</span>
+                    <button id="openrouter-key-btn" className="model" type="button" aria-label="Model: OpenRouter Free minimax-m3" onClick={() => {
+                      const k = getOpenRouterKey()
+                      if (isKeyRevoked(k)) {
+                        setTempKey(localStorage.getItem('openrouter_key') || '')
+                        setShowKeyDialog(true)
+                      } else {
+                        showToast(`Model: ${OPENROUTER_MODEL} (key set). Data: Firestore + local cache.`)
+                      }
+                    }}>
+                      <span>OpenRouter · Free {isKeyRevoked(getOpenRouterKey()) ? '• offline' : '• live'}</span>
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                         <path d="M6 9l6 6 6-6" />
                       </svg>
@@ -1674,6 +1728,73 @@ export default function App() {
       <div className={`toast ${toast.on ? 'on' : ''} ${toast.err ? 'err' : ''}`} id="toast" role="status" aria-live="polite" aria-atomic="true">
         {toast.msg}
       </div>
+
+      {showKeyDialog && (
+        <div className="lock on" role="dialog" aria-modal="true" aria-label="Set OpenRouter key" onClick={() => setShowKeyDialog(false)}>
+          <div className="lock-card" onClick={(e) => e.stopPropagation()} style={{ width: 'min(92vw,420px)' }}>
+            <h3 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" width="18" height="18"><path d="M12 2l7 4v6c0 5-3.5 9-7 10-3.5-1-7-5-7-10V6l7-4z" /></svg>
+              OpenRouter Free Key
+            </h3>
+            <p style={{ fontSize: 12.5, color: 'var(--ink-3)', lineHeight: 1.55 }}>
+              Current key is revoked (401). Add your <b>free</b> key from <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" style={{ color: 'var(--accent-2)', textDecoration: 'underline' }}>openrouter.ai/keys</a> to enable <b>{OPENROUTER_MODEL}</b> (free). Leave empty to use <b>offline portfolio answers</b> (no network, no 401).
+              <br /><span className="muted" style={{ fontSize: 11 }}>Stored in <code>localStorage.openrouter_key</code> only on this device.</span>
+            </p>
+            <div className="field">
+              <label htmlFor="openrouterKeyInput">API Key (sk-or-v1...)</label>
+              <input
+                id="openrouterKeyInput"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="sk-or-v1-..."
+                value={tempKey}
+                onChange={(e) => setTempKey(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    try { localStorage.setItem('openrouter_key', tempKey.trim()); if (!tempKey.trim()) localStorage.removeItem('openrouter_key') } catch {}
+                    setShowKeyDialog(false)
+                    showToast(tempKey.trim() ? 'Key saved — free model will be used' : 'Using offline free mode (no key)')
+                  }
+                }}
+              />
+            </div>
+            <div className="lock-err" style={{ minHeight: 0, fontSize: 11, color: 'var(--ink-3)' }}>
+              {isKeyRevoked(getOpenRouterKey()) ? 'Current: revoked offline mode' : `Current: ${getOpenRouterKey().slice(0, 12)}… live`}
+            </div>
+            <div className="lock-row">
+              <button
+                className="btn acc"
+                style={{ flex: 1 }}
+                onClick={() => {
+                  try {
+                    const v = tempKey.trim()
+                    if (v) localStorage.setItem('openrouter_key', v)
+                    else localStorage.removeItem('openrouter_key')
+                  } catch {}
+                  setShowKeyDialog(false)
+                  showToast(tempKey.trim() ? 'Key saved — free model will be used' : 'Using offline free mode (no key)')
+                }}
+              >
+                Save
+              </button>
+              <button className="btn ghost" onClick={() => setShowKeyDialog(false)}>Cancel</button>
+              <button
+                className="btn ghost"
+                onClick={() => {
+                  try { localStorage.removeItem('openrouter_key') } catch {}
+                  setTempKey('')
+                  setShowKeyDialog(false)
+                  showToast('Using offline free mode (no key)')
+                }}
+              >
+                Use offline
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }
